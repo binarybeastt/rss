@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime, timedelta
 import pytz
 import re
+from newspaper import Article
 
 # Database simulation (replace with actual database like PostgreSQL/SQLAlchemy)
 class APIKeyManager:
@@ -32,7 +33,7 @@ class APIKeyManager:
         Returns:
             str: Generated API key
         """
-        key = f"an_{secrets.token_urlsafe(32)}"
+        key = f"yn_{secrets.token_urlsafe(32)}"
         expiration = datetime.now(pytz.UTC) + timedelta(days=expires_in)
         
         self._keys[key] = {
@@ -113,10 +114,10 @@ class NewsArticle(BaseModel):
     link: str
     description: str
     published_at: str
-    source: str = Field(default="Google News")
+    source: str = Field(default="Yahoo News")
     content: Optional[str] = None
 
-class GoogleNewsRSSFetcher:
+class YahooNewsRSSFetcher:
     @staticmethod
     async def fetch_news(
         query: str, 
@@ -135,10 +136,10 @@ class GoogleNewsRSSFetcher:
             List[NewsArticle]: List of news articles
         """
         try:
-            # Use asyncio to potentially parallelize content fetching
-            rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+            # Yahoo News RSS URL with query encoding
+            rss_url = f"https://news.yahoo.com/rss?p={query}"
             
-            # Use requests-futures or httpx for true async
+            # Use asyncio to potentially parallelize content fetching
             loop = asyncio.get_event_loop()
             feed = await loop.run_in_executor(None, feedparser.parse, rss_url)
             
@@ -147,15 +148,15 @@ class GoogleNewsRSSFetcher:
                 article_data = {
                     'title': entry.get('title', ''),
                     'link': entry.get('link', ''),
-                    'description': GoogleNewsRSSFetcher._clean_description(entry.get('summary', '')),
-                    'published_at': GoogleNewsRSSFetcher._parse_time(entry.get('published', '')),
+                    'description': YahooNewsRSSFetcher._clean_description(entry.get('description', '')),
+                    'published_at': YahooNewsRSSFetcher._parse_time(entry.get('published', '')),
                 }
                 
                 if include_content:
-                    # Parallel content fetching
+                    # Parallel content fetching using newspaper3k
                     content = await loop.run_in_executor(
                         None, 
-                        GoogleNewsRSSFetcher._fetch_content, 
+                        YahooNewsRSSFetcher._fetch_content_advanced, 
                         entry.get('link', '')
                     )
                     article_data['content'] = content
@@ -185,41 +186,97 @@ class GoogleNewsRSSFetcher:
             return datetime.now(pytz.UTC).isoformat()
 
     @staticmethod
-    def _fetch_content(url: str) -> str:
-        """Fetch article content with timeout and error handling"""
+    def _fetch_content_advanced(url: str) -> Optional[str]:
+        """
+        Advanced content extraction using newspaper3k
+        
+        Args:
+            url (str): URL of the article
+        
+        Returns:
+            Optional[str]: Full article content or None
+        """
+        try:
+            # Download and parse the article
+            article = Article(url)
+            article.download()
+            article.parse()
+            
+            # Extract main article text
+            return article.text if article.text else None
+        
+        except Exception as e:
+            logging.warning(f"Advanced content fetch error for {url}: {e}")
+            
+            # Fallback to traditional method if newspaper3k fails
+            try:
+                return YahooNewsRSSFetcher._fetch_content_fallback(url)
+            except Exception:
+                return None
+
+    @staticmethod
+    def _fetch_content_fallback(url: str) -> Optional[str]:
+        """
+        Fallback content extraction method
+        
+        Args:
+            url (str): URL of the article
+        
+        Returns:
+            Optional[str]: Full article content or None
+        """
         try:
             response = requests.get(url, timeout=5)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
-            paragraphs = soup.find_all('p')
-            content = ' '.join([p.get_text(strip=True) for p in paragraphs])
             
-            return (content[:2000] + '...') if len(content) > 2000 else content
+            # More sophisticated content extraction for Yahoo News and general sites
+            content_selectors = [
+                'div.article-body',
+                'div.content',
+                'article',
+                'div.post-content',
+                'div.caas-body',  # Specific to Yahoo News article structure
+                'main',
+                'body'
+            ]
+            
+            for selector in content_selectors:
+                content_div = soup.select_one(selector)
+                if content_div:
+                    paragraphs = content_div.find_all('p')
+                    content = ' '.join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
+                    return content if content else None
+            
+            # If no specific selector works, fall back to all paragraphs
+            paragraphs = soup.find_all('p')
+            content = ' '.join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
+            return content if content else None
         
         except requests.RequestException as e:
-            logging.warning(f"Content fetch error for {url}: {e}")
-            return "Content unavailable"
+            logging.warning(f"Fallback content fetch error for {url}: {e}")
+            return None
 
 # FastAPI App Configuration
 app = FastAPI(
-    title="Google News Fetcher API",
+    title="Yahoo News Fetcher API",
     description="Efficient News Aggregation API with API Key Management",
     version="1.0.0"
 )
 
-@app.get('/news/google', response_model=Dict, dependencies=[Depends(get_api_key)])
-async def get_google_news(
-    query: str = Query(..., description="Search query for Google News"),
+@app.get('/news/yahoo', response_model=Dict, dependencies=[Depends(get_api_key)])
+async def get_yahoo_news(
+    query: str = Query(..., description="Search query for Yahoo News"),
     limit: int = Query(10, ge=1, le=50, description="Maximum articles"),
     include_content: bool = Query(False, description="Include article content")
 ):
     """
-    Fetch Google News headlines with optional full content
+    Fetch Yahoo News headlines with optional full content
     Requires valid API key in X-API-Key header
     """
     try:
-        headlines = await GoogleNewsRSSFetcher.fetch_news(query, limit, include_content)
+        headlines = await YahooNewsRSSFetcher.fetch_news(query, limit, include_content)
         return {
             'status': 'success',
             'query': query,
