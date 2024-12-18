@@ -7,3 +7,4 @@ pytz
 sqlalchemy 
 pydantic
 newspaper3k 
+lxml[html_clean]
