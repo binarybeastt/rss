@@ -15,7 +15,6 @@ from pydantic import BaseModel, Field
 from datetime import datetime, timedelta
 import pytz
 import re
-from newspaper import Article
 
 # Database simulation (replace with actual database like PostgreSQL/SQLAlchemy)
 class APIKeyManager:
@@ -115,7 +114,6 @@ class NewsArticle(BaseModel):
     description: str
     published_at: str
     source: str = Field(default="Google News")
-    content: Optional[str] = None
 
 class GoogleNewsRSSFetcher:
     @staticmethod
@@ -185,96 +183,6 @@ class GoogleNewsRSSFetcher:
         except Exception:
             return datetime.now(pytz.UTC).isoformat()
 
-    @staticmethod
-    def _fetch_content(url: str) -> str:
-        """Fetch article content with timeout and error handling"""
-        try:
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            paragraphs = soup.find_all('p')
-            content = ' '.join([p.get_text(strip=True) for p in paragraphs])
-            
-            return (content[:2000] + '...') if len(content) > 2000 else content
-        
-        except requests.RequestException as e:
-            logging.warning(f"Content fetch error for {url}: {e}")
-            return "Content unavailable"
-        
-    @staticmethod
-    def _fetch_content_advanced(url: str) -> Optional[str]:
-        """
-        Advanced content extraction using newspaper3k
-        
-        Args:
-            url (str): URL of the article
-        
-        Returns:
-            Optional[str]: Full article content or None
-        """
-        try:
-            # Download and parse the article
-            article = Article(url)
-            article.download()
-            article.parse()
-            print(article.text)
-            # Extract main article text
-            return article.text if article.text else None
-        
-        except Exception as e:
-            logging.warning(f"Advanced content fetch error for {url}: {e}")
-            
-            # Fallback to traditional method if newspaper3k fails
-            try:
-                return GoogleNewsRSSFetcher._fetch_content_fallback(url)
-            except Exception:
-                return None
-
-    @staticmethod
-    def _fetch_content_fallback(url: str) -> Optional[str]:
-        """
-        Fallback content extraction method
-        
-        Args:
-            url (str): URL of the article
-        
-        Returns:
-            Optional[str]: Full article content or None
-        """
-        try:
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # More sophisticated content extraction
-            # Try different common content container selectors
-            content_selectors = [
-                'div.article-body',
-                'div.content',
-                'article',
-                'div.post-content',
-                'main',
-                'body'
-            ]
-            
-            for selector in content_selectors:
-                content_div = soup.select_one(selector)
-                if content_div:
-                    paragraphs = content_div.find_all('p')
-                    content = ' '.join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
-                    return content if content else None
-            
-            # If no specific selector works, fall back to all paragraphs
-            paragraphs = soup.find_all('p')
-            content = ' '.join([p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)])
-            return content if content else None
-        
-        except requests.RequestException as e:
-            logging.warning(f"Fallback content fetch error for {url}: {e}")
-            return None
-
 # FastAPI App Configuration
 app = FastAPI(
     title="Google News Fetcher API",
@@ -286,14 +194,13 @@ app = FastAPI(
 async def get_google_news(
     query: str = Query(..., description="Search query for Google News"),
     limit: int = Query(10, ge=1, le=50, description="Maximum articles"),
-    include_content: bool = Query(False, description="Include article content")
 ):
     """
     Fetch Google News headlines with optional full content
     Requires valid API key in X-API-Key header
     """
     try:
-        headlines = await GoogleNewsRSSFetcher.fetch_news(query, limit, include_content)
+        headlines = await GoogleNewsRSSFetcher.fetch_news(query, limit)
         return {
             'status': 'success',
             'query': query,
